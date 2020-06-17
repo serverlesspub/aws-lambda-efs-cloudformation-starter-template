@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: > 
+  Starter template for AWS Lambda EFS mounts. 
+  Creates the entire infrastructure and related IAM permissions
+  required for a Lambda function to mount an EFS volume.
+Parameters:
+  MountPoint:
+    Type: String
+    Default: '/mnt/test'
+    Description: Mount point inside the Lambda runtime
+  EfsPath:
+    Type: String
+    Default: "/test"
+    Description: EFS volume directory to mount
+
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: '10.0.0.0/16'
+    SubnetOne:
+      CIDR: '10.0.0.0/24'
+
+Resources:
+
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties: 
+      PerformanceMode: generalPurpose
+      ProvisionedThroughputInMibps: 10
+      ThroughputMode: provisioned
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap ['SubnetConfig', 'VPC', 'CIDR']
+
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Allows access to the file system'
+      VpcId: !Ref 'VPC'
+
+  SubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: 
+         Fn::Select:
+         - 0
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap ['SubnetConfig', 'SubnetOne', 'CIDR']
+
+  SubnetOneMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref FileSystem
+      SecurityGroups: 
+        - !Ref SecurityGroup
+      SubnetId: !Ref SubnetOne
+
+  FileSystemAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties: 
+      FileSystemId: !Ref FileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "0777"
+        Path: !Ref EfsPath
+
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: VPC
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:DescribeNetworkInterfaces'
+                Resource: '*'
+
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    DependsOn: SubnetOneMountTarget    
+    Properties:
+      Handler: lambda.handler
+      Runtime: nodejs12.x
+      Timeout: 30
+      Code: src/ 
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          MOUNT_POINT: !Ref MountPoint 
+      FileSystemConfigs:
+        - Arn: !Sub 'arn:aws:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:access-point/${FileSystemAccessPoint}'
+          LocalMountPath: !Ref MountPoint
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        SubnetIds:
+          - !Ref SubnetOne
